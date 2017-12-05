@@ -1,99 +1,235 @@
 \documentclass[letterpaper,twocolumn,10pt]{article}
 \usepackage{epsfig,xspace,url}
+\usepackage{graphicx}
+\graphicspath{ {images/} }
 \usepackage{authblk}
-
+\usepackage{float}
+\usepackage[export]{adjustbox}
 
 %\usepackage[breaklinks]{hyperref}
 
 \title{EMARS: Efficient Management and Allocation of Resources in Serverless\\}
-\author{Aakanksha Saha, Aisha Syed, Jacobus Van der Merwe, Sonika Jindal}
+\author{Aakanksha Saha, Sonika Jindal, Aisha Syed, Jacobus Van der Merwe}
 \date{}
-\affil{University of Utah}
+\affil{University of Utah \footnote{Aiming for HotCloud'18 \\(https://www.usenix.org/conference/hotcloud18)}}
 
 \begin{document}
 
 \maketitle
-\title{\textbf{Abstract:}} The latest serverless
-solutions are really server-hidden and built to host functions 
-and hide that how the functions runs on servers or how scaling is 
-done. Unlike SaaS or PaaS that are always running, but scale 
-on-demand, serverless workloads run on-demand, and consequently, 
-scale on-demand. There are mutual economic pressure as Cloud 
-providers need to cost-compete by using datacenters resources more 
-efficiently while Cloud customers seek to reduce cost by minimizing resource wastage. Both can be satisfied by better matching of application needs to allocated services. 
-In this paper, we explore and compare various serverless platforms in terms of latencies incurred by them because of resource allocation. We analyse various serverless platforms and propose benchmark for performance measurements. 
+\title{\textbf{Abstract:}} We introduce EMARS, an efficient resource management system for Serverless Cloud Computing frameworks with the goal to enhance resource allocation among containers. We have built the prototype on top of an open-source serverless platform, OpenLambda. The prototype implementation uses a novel approach of resource allocation (memory) to the containers running the functions. It is based upon application workloads and function's memory needs. As a background motivation we analyze the latencies of serverless offerings from few serverless offerings (AWS Lambda and Microsoft Azure). We analyzed the effects of memory limits on latencies. The memory limits also lead to variations in number of containers spawned on OpenLambda. Thus we use memory limit settings to present our proposed model of efficient memory management. 
 
 \section{Introduction}
 \label{sec:first}
-Serverless cloud computing is a paradigm in which the cloud providers dynamically provisions machine resources for the user applications to run. And in turn, the user pays only for the compute resources utilized by their application. The applications are broken into modular functions which are stateless, event-driven and short lived.
+\subsection{Background}
+The cloud industry has seen multiple ways in which the cloud providers can allocate the servers to the customers. There has been a shift from bare-metal servers to virtualized environments to containers. The shift towards containers gives an advantage to developers to provide them the freedom to care about only their application without worrying about the environment and dependencies. Next leap towards this goal is the introduction of ``Functions", which are event-driven action based piece of code that runs on serverless platform. These functions execute inside sandboxes based upon the run-time environments such as containers or light-weight VMs. Serverless cloud computing is a model in which the cloud provider manages the execution of applications written in the form of functions. The developers don't need to worry about the management and provisioning of servers. They don't need to define how much storage or how much compute resources are required by the application. Containers provide operating system level virtualization for running multiple isolated systems on a host. This is achieved using linux kernel’s capability of cgroup\cite{cgroup} (control groups) and namespaces. Many different implementations like Docker\cite{docker}, LXC\cite{lxc}, etc exist to create Linux containers. These implementations allow configuration of system resources for a group of processes running in containers.
 
-The serverless architecture comes in useful for cases like bursty workloads where demand is not known upfront. Such scenarios require quick expansion and shrinking of resources. The need can be achieved if the functions can be spawned quickly in containers. To further reduce the invocation latencies, there is a need to efficiently manage the containers such that the startup time ($\approx$ 100ms) of containers can be avoided.
+The applications are decomposed into short-lived event-driven functions which can be independently scaled by the cloud provider. It is the responsibility of the cloud provider to manage the resources in efficient manner such that more and more containers (and hence the applications) can be executed at the same server. Thus, cloud providers need to improve the resource utilization by only allocating as many resources as and when required. This in-turn helps customers to only pay for their usage.
 
-The following are the key challenges in a serverless platform concerning resource management:
+There are different ways in which resource allocation and usage can be done efficiently. We define four Rs of efficiency:
 \begin{enumerate}
-\item {\it Cost:} Minimizing resource usage by serverless function, both when it is executing and when idle. 
-
-\item {\it Cold start:} A key differentiator of serverless is the ability to scale to zero, or not
-charging customers for idle time. Scaling to zero, however, leads to the problem
-of cold starts, and paying the penalty of getting serverless code ready to run.
-Techniques to minimize the cold start problem while still scaling to zero are
-critical.
-
-\item {\it Resource limits:} Resource limits are needed to ensure that the platform can handle
-load spikes, and manage attacks. Enforceable resource limits on a serverless
-function include memory, execution time, bandwidth, and CPU usage. In additional,
-there are aggregate resource
-
-\item {\it Scaling:} The platform must ensure the scalability and elasticity of users’ functions. This includes pro-actively provisioning resources in response to load, and
-in anticipation of future load.
+\item {\it Reduce}: limiting the resources given to each container as per the actual needs.
+\item {\it Reuse}: allowing containers to be kept in {\it warm} \footnote{Keeping containers `warm' means to have the necessary pre-processing step already executed which initializes the container and pull the related dependencies and images.} state and be made usable to avoid start up time.
+\item {\it Recycle}: killing the containers only when they are not used for a long duration.
+\item {\it Refuse}: not letting new containers get spawned if the system is overloaded.
 \end{enumerate}
 
-Proactive allocation of resources remains a challenging problem. One of the solutions could be to train the system for predicting the requirements based upon the data gathered. The useful information can be in the form of type of the requests received for certain period, type of resources needed to handle the request etc. In a nutshell, resource management can be done based upon the container type and application type by appropriately allocating the system resources.
+Overall, the resource efficiency can be achieved if resource availability can be correctly mapped to the application requirements. To perform such efficient allocations, applications should be monitored on memory, latency and the invocations. By such monitoring, various insights can be drawn about the system requirements that can help in capacity planning and scalability.
 
-In this paper, we make the following contributions:
+With an intent to find a method of efficient resource allocation for serverless platforms, we make the following contributions in this paper:
 \begin{enumerate}
-\item Analysed various serverless platforms for latency in function invocations.
-\item Build a benchmark for evaluating the performance.
-\item Propose EMARS for efficient resource allocation. 
+\item Analyzed the behavior of different serverless platforms.
+\item Proposed models to efficiently allocate resources based upon the memory usage and workload.
+\item Evaluation of the proposed model and opportunity for future work.
 \end{enumerate}
 
+\subsection{Motivation}
+
+We attempted to find, how the resource optimization is done currently on different platforms. This was done by performing tests on different serverless platforms, hands-on experience with some open source platforms and reading through different work in this area.
+
+We performed latency tests and plotted the response times for few initial requests on AWS Lambda~\cite{aws} and Azure Functions~\cite{azure}. As seen from the graphs in Figure \ref{fig:Figure1} and  Figure \ref{fig:Figure2}, both AWS and Azure take longer during the first invocation and the following ones take much lesser time. 
+
+{\it The key insight from this experiment was that cloud providers maintain containers in warm state after the execution has completed for the first request. Then the same container is reused so that the startup time for booting and setting up dependencies can be avoided.} (Some work have been done to compare the delays in scaling due to different types of startup procedures for containers \cite{scalecon}).
+
+\begin{figure}[H]
+\includegraphics[width=8cm, left]{invocationTime_aws}
+    \caption{Response Time AWS}
+    \label{fig:Figure1}
+\end{figure}
+\begin{figure}[H]
+\includegraphics[width=8cm, right]{invocationTime_azure}
+    \caption{Response Time for Azure}
+    \label{fig:Figure2}
+    \end{figure}
+    
+We also analyzed the code of OpenWhisk\cite{whisk} and Fission.io\cite{fission} to find out the methods used by them. Both of them create pools of warm containers; either generic ones or function specific ones to reduce the start-up time.
+
+Moving on to the analysis of memory requirements, we wrote two functions, one more memory intensive than the other and plotted the response time with different memory limits imposed on them. AWS allows to change the memory limits for the functions: Minimum is 128MB and maximum 3008MB.
+
+The graph in Figure \ref{fig:Figure3} is a plot of memory limit \textit{vs.} latency for two different functions running on AWS. Here the Y axis denotes the response times in milliseconds and X axis represents the memory limit in MBs. At 512 MB memory limit, the mem\_alloc function took about 949ms while at 1024 MB, it took only 400ms. Other lambda functions displayed the similar trend of decreasing latencies with increasing memory. But, after a certain point the latency remains constant even if we increase the memory limit to maximum. 
+\begin{figure}[H]
+\includegraphics[width=8cm]{aws_hello_mem}
+    \caption{Memory vs Latency}
+    \label{fig:Figure3}
+    \end{figure}
+
+{\it The key takeaway from this experiment was that as we decrease the memory to a function, the latency in responses increase. But when we increase the memory further after an optimal point, there is no effect on latency. Thus, memory limits should be assigned to functions based upon function needs overriding the defaults .}
+
+Another experiment was performed with OpenLambda\cite{openlambda.wp} to plot the number of containers spawned by the server with respect to different memory limits. From Figure \ref{fig:Figure4} and Figure \ref{fig:Figure5}, we see that memory limits in control groups can affect the number of containers created by the server. If these containers can be reused optimally, a better faster solution can be built.
+
+\begin{figure}[H]
+\includegraphics[width=8cm]{histHand}
+    \caption{Containers spawned with different cache sizes}
+    \label{fig:Figure4}
+\end{figure}
+
+\begin{figure}[H]
+\includegraphics[width=8cm]{histTime}
+    \caption{Time taken with different cache sizes}
+    \label{fig:Figure5}
+\end{figure}
+
+With all these experiments we realized that the memory allocated by default for a particular function might not be optimal and there is a scope to efficiently assign memory at the cost of latency to execute more containers and as a result more functions. It might also be possible to limit the resources to functions if the system is under memory starvation. 
+
+In the next section we describe our proposed solution in detail. 
 \section{Implementation}
-\label{sec:third}
+\label{sec:second}
+\subsection{Solution}
+To realize resource allocation when the system requirements are not known beforehand, applications need to be monitored for their usage of resources. By monitoring the resource usage, a fair idea can be derived about the application needs. This can help in capacity planning and scalability. EMARS is our solution for such monitoring on the basis of memory needs and invocations of the functions. EMARS is a pluggable architecture which runs parallel to the server's logic of executing applications. It collects information about different parameters from the request to functions and generate optimal configurations to be used while handling further requests to those functions. This can be done {\it Predictively} as well as {\it Reactively}.
 \begin{enumerate}
-\item Current handling of containers in OpenLambda
-\item Proposed container allocation in OpenLambda
-\item Flow diagram with EMARS approach.
+\item Predictive: Log the requests and predict the configurations for future invocations based upon the current usage.
+\item Reactive: Update the resource limits dynamically based upon the system load and bursts in traffic conditions.
+
+\end{enumerate}
+\subsection{Approach}
+Our solution is based on top of the open source serverless platform OpenLambda~\cite{openlambda.wp}. It is a platform for building next-generation lambda services and applications in the burgeoning model of serverless computation. It is written in Go language. The goal of this project is to enable exploration of new approaches  in serverless architecture.
+
+OpenLambda creates a separate cgroup for its docker containers and allocates default memory limits to the function handlers(containers). For efficiently allocating memory to the containers, we propose two {\it Predictive} models; {\bf workload-based and memory-based} for spawning containers with optimal resource restrictions. These models will be used to recommend new cgroup configurations at run time for the docker containers running the lambda functions.
+
+Control groups, or cgroups~\cite{cgroup}, is a kernel feature introduced to provide a way of limiting access to system resources for a group of processes. Serverless platforms run functions on the same server with shared resources. So, servers need to provide resource isolation [memory, CPU, disk and network] to the function handlers running on the same server. Control groups allow monitoring of the group's configurations, deny access to certain resources, and even reconfigure them dynamically on a running system. These groups are attached to one or more subsystems, which corresponds to single resource like memory, cpu, etc. The memory subsystem is of particular interest to us for our solution. It allows us to set limits on memory usage of the containers dynamically as well as while loading. Few of the cgroup parameters from the memory subsystem which we use to efficiently manage the container spawning are:
+\begin{enumerate}
+\item memory.max\_usage\_in\_bytes: It reports the maximum memory used by processes in the cgroup (in bytes).
+\item memory.limit\_in\_bytes: It sets the maximum limit of memory that can be used by a process. 
+\item memory.oom\_control: If enabled, tasks that attempt to consume more memory than they are allowed are immediately killed by the Out of Memory (OOM) killer.
 \end{enumerate}
 
+The next section describes our proposed EMARS model build on top of OpenLambda for predictably setting fine grained memory limits based on application requirements. 
+
+\subsection{Overview}
+
+OpenLambda mirrors the Lambda model of AWS where, Lambda handlers or function handlers from different customers share common pools of servers managed by the cloud provider, so developers
+need not worry about server management. 
+%In this manner, the OpenLambda model creates a cluster of multiple worker. These workers are responsible for handling functions and are the recipient of the request. 
+%Functions are the user defined event-driven applications. 
+Figure \ref{fig:Figure6} shows the flow diagram of OpenLambda: the left blocks correspond to the current workflow of and the right blocks correspond to our new EMARS predictive solution based upon which the container instantiation block of OpenLambda is modified.
+As we can see in Figure \ref{fig:Figure6} that whenever the user issues an http request, the server (handling the function) pulls the appropriate lambda handler from the function repository. After that it goes to the next if block and verifies if a container is already running for this handler; if yes it unpauses it and serves the request and if not it creates a container and serves it. In the basic flow the creation and execution of new the container is based on the default cgroup configurations for the memory subsystem. 
+
+
+\subsection{Proposed EMARS solution}
+
+As a step towards efficient allocation of memory to the containers we propose two models: the workload-based model and the memory-based model. 
+These models log different parameters based upon the http request invocations and feed this report in a configuration file at the end of a certain period. Currently this period is set to 24 hours. So, from Figure \ref{fig:Figure6} we can see that the thread running workload based model and the thread running memory based model feed there data to the config generator thread which generates the optimal memory configurations per lambda function and recommends these configurations to the creation and execution of containers. Going into the details of each of these threads:
+%\begin{figure}[H]
+%\includegraphics[width=8cm]{current_flow}
+    %\caption{OpenLambda: Current workflow}
+    %\label{fig:Figure6}
+%\end{figure}
+
+
+\begin{enumerate}
+\item\textbf{ Memory based model:} 
+In this modeling we capture the memory requirements of each function throughout the day. We use the command \textit{docker stats} to retrieve the memory usage of the function and log the maximum usage. At the completion of 24 hours this data is fed to the config generator thread that recommends memory optimization for the new container to be spawned. The following is a pseudo code for memory based modeling. 
+{\tt \small
+\begin{verbatim}
+while True{
+   if(time.Hour() == 24){
+	  Send signal to config generator thread;
+	}
+   else{
+		 Run docker stats;
+		 Map the container IDs to the function names;
+		 Log the max memory usage by each function;
+		 sleep 10;
+	   }
+}
+\end{verbatim}
+}
+
+\item \textbf{Workload based model:}
+Knowledge about the workload is an important aspect for scheduling of resources. So, in this method we log the number of requests for each function throughout the day. At the end of 24 hours we send the details to the config generator thread which stores this value for every function. The logging can be done at different granularity levels like on hourly basis. This will be retrieved for any new function call on the next day. The following shows the pseudo code for workload based modeling. 
+{\tt \small
+\begin{verbatim}
+while True{
+   if(time.Hour() == 24){
+	  Send signal to config generator thread;
+	}
+   else{
+		 Log the number of requests for each function;
+	   }
+}
+\end{verbatim}
+}
+
+\item \textbf{Config Generator:}
+This thread keeps on receiving the data from the the memory based and workload based model  and generates a configuration file for each lambda function. An example can be: \textit{\{Number\_of\_request, Maximum\_memory\}}. With this setting in place every time a lambda function is invoked it will read the corresponding configuration file and based on that it will restrict/allocate resources (using the memory subsystem of cgroup) to the container serving the function.
+\end{enumerate}
+\begin{figure}[H]
+\includegraphics[width=8cm]{proposed_flow}
+    \caption{OpenLambda: Proposed workflow}
+    \label{fig:Figure6}
+\end{figure}
+
+Thus, with this predictive model of EMARS we aim to  generate the optimal configurations for the containers based upon application usage and requirement. Currently the workload based modeling along with the configuration file generator is completed and integrated with the OpenLambda code. A separate script for memory based modeling has been written which can dynamically update the memory configurations of containers. We aim to provide Reactively updating resource limits based on the machine load as our future work. 
 \section{Evaluation}
-\label{sec:fourth}
-\begin{enumerate}
-\item Test against the benchmarking suite
-\item Compare performance with current platforms.
-\end{enumerate}
+\label{sec:third}
+
+The results achieved from our implementation of dynamic memory allocation were in sync with the behavior of AWS lambda. It was seen that reducing the memory increases the latency of lambda functions and vice versa.
+
+\begin{figure}[H]
+\includegraphics[width=8cm]{hello_mem}
+    \caption{OpenLambda: Hello\_World function}
+    \label{fig:Figure8}
+\end{figure}
+\begin{figure}[H]
+\includegraphics[width=8cm]{mem_mem}
+    \caption{OpenLambda: Memory\_alloc function}
+    \label{fig:Figure9}
+\end{figure}
+\textbf{Test Environment:} The tests were performed on CloudLab Server using a virtual machine (VM) having Ubuntu 16.04. The OpenLambda code version v.1.0.0 was downloaded and configured on the VM. Two lambda functions
+\textit{Hello\_world} and \textit{Mem\_alloc} were written in Python.
+\textbf{Results:} The http request to the \textit{Hello\_world} function simply responds with a ``Hello" message while \textit{Mem\_alloc} is a memory intensive function which creates an array of 1 million integers and does array operations. The latencies with varying memory limits were captured by sending http requests from a remote system to instantiate these lambda functions.
+
+Figure \ref{fig:Figure8} shows the Memory vs. Latency graph for \textit{Hello\_world} function and at 6MB the latency of the function is 3.3 seconds while at 10 it's close to 1.2 seconds. And the least memory which can be assigned to this function is 4 MB but it comes at a cost of latency, which is around 8 seconds. Similarly Figure \ref{fig:Figure9} shows the plot for \textit{Mem\_alloc} function. Since it is a memory intensive function the memory requirements of this function is more. A stark difference in response time can be noticed when the function handler was given 50 MB \textit{vs.} 10 MB.
+
+\textit{The key insight from the evaluation results are: restricting memory to a function downgrades the performance by increasing  latency but assigning memory limits based upon the function needs can help in efficient management and allocation of resources.} 
 
 
-\section{Future work}
-\label{sec:fifth}
-\begin{enumerate}
-\item Apply machine learning to predict the application behaviour collected from logs and manage resources appropriately.
-\item Strong isolation of containers running on the shared platform to enhance security.
-\end{enumerate}
 
-\section{Conclusion}
-\label{sec:sixth}
-In this work we present an analysis of resource allocation done inside various serverless platforms. We also present the effect of resource allocation techniques used in some open source serverless platforms. Further we propose a design based upon OpenLambda for resource allocation as per the learnings from variety of loads.
+
 
 \section{Related work}
-\label{sec:seventh}
-There have been work done in analysing the latencies due to container allocation \cite{mcgrath.wp}. To enable the serverless technology, there are still some gaps to be filled in terms of monitoring and analysis which is done by various tools. There are tools like \cite{iopipe} to monitor the function performance specific to AWS Lambda. OpenLambda \cite{openlambda.wp} compares the response times of lambda functions vs elastic BS virtual machines.
+\label{sec:fourth}
+There have been work done in analysing the latencies due to container allocation and start-up \cite{mcgrath.wp}, \cite{scalecon}. To enable the serverless technology, there are still some gaps to be filled in terms of monitoring and analysis which is done by various tools. There are tools like \cite{iopipe} to monitor the function performance specific to AWS Lambda. OpenLambda \cite{openlambda.wp} compares the response times of lambda functions \textit{vs.} elastic BS\cite{awsbs} virtual machines. Wes Felter et al. compare the containers and VM performance in \cite{vmcon}.
 
 To our knowledge, most of the platforms perform resource scaling using eager pooling and resource shrinking like in OpenWhisk\cite{whisk} and Fission.io\cite{fission}. An initial pool of containers is allocated and based upon the demand the pool is expanded or shrunk.
 
-%Some benchmarking has also been done for performance of serverless framework\cite{faasperf.wp}.
+There have been work in optimizing the cloud for the business needs of the cloud \cite{Litoiu}, enhancing security in containers \cite{docksec} etc. Also some work has been done in optimizing resources by using cgroups like in \cite{rtrm}. Our solution is done specifically for serverless platforms with the goal to keep memory utilization optimal.
+
+\section{Discussion and possibilities}
+\label{sec:fifth}
+
+With this work, we created a model where memory and workload can be monitored to predict the future requirements. In our current implementation, memory limits are set by our code dynamically which runs independent of OpenLambda. As an immediate goal, this dynamic update to memory needs to be integrated with OpenLambda to make it a complete solution. Optimal method to generate the configuration files for each function, based upon the logged information needs to be worked on. For workload based modeling, a threshold value needs to be figured out based upon further tests. For example if there are 500 calls to a function assign 1024MB as soft limit, so that more containers can be spawned.
+
+For long term goals, we can build a reactive methodology as well which can work in conjunction to the predictive method to change the limits as per the machine load or as per the real usage if it is different than the prediction. This will provide elastic scaling. Like AWS, an infrastructure can be built to let users specify their requirements. User parameters can be given higher priority. Apart from this applying machine learning techniques to predict optimal memory requirements can be another direction of future work.
+
+\section{Conclusion}
+\label{sec:sixth}
+In this work we presented an analysis of resource allocation done in various serverless platforms. We also presented effects of resource allocation techniques used in some open source serverless platforms. Further, we proposed models based upon OpenLambda for resource allocation as per the learnings from variety of loads. By performing different tests, we also concluded that with changing memory limits, latencies are also changed. Thus, the trade off between memory and latency is the important insight we draw from our work and finding an optimal value of memory usage which guarantees the right latency is the ``sweet spot" which we proposed to exploit.
+
+
+%Some benchmarking has also been done for performance ofhttps://aws.amazon.com/ serverless framework\cite{faasperf.wp}.
 
 {
-  %\footnotesize 
+  \footnotesize 
   \small 
   \bibliographystyle{acm}
   \bibliography{biblio}
